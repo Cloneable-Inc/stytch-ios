@@ -114,18 +114,63 @@ class ObjectStorage<WrapperType: ObjectStorageWrapper> {
     }
 }
 
+/// In-memory fallback for session objects, mirroring the token fallback in
+/// `SessionManager`: when the encrypted store cannot persist (encryption key
+/// unavailable this launch), the live session set by an authenticate call must
+/// stay visible for the rest of the process. Persisted state wins on read.
+final class ObjectMemoryFallback<T> {
+    private let lock = NSLock()
+    private var value: T?
+    private var validatedAt: Date?
+
+    func set(_ newValue: T?) {
+        lock.lock()
+        value = newValue
+        validatedAt = newValue == nil ? nil : Date()
+        lock.unlock()
+    }
+
+    var object: T? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    var lastValidatedAt: Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        return validatedAt
+    }
+}
+
 class SessionStorageWrapper: ObjectStorageWrapper {
     @Dependency(\.sessionManager) var sessionManager
     let item = EncryptedUserDefaultsItem.session
     var dataWasExpected = false
+    private let memoryFallback = ObjectMemoryFallback<Session>()
+
+    var lastValidatedAtDate: Date? {
+        let last = try? userDefaultsClient.getObject(Date.self, for: EncryptedUserDefaultsItem.lastValidatedAtDate(item.name))
+        return last ?? memoryFallback.lastValidatedAt
+    }
 
     func setObject(object: Session?) {
+        memoryFallback.set(object)
         dataWasExpected = object != nil
         try? userDefaultsClient.setObjectValue(object, for: item)
     }
 
     func getObject() throws -> Session? {
-        var sessionToReturn: Session? = try userDefaultsClient.getObject(Session.self, for: item)
+        var sessionToReturn: Session?
+        do {
+            sessionToReturn = try userDefaultsClient.getObject(Session.self, for: item)
+        } catch {
+            guard let fallback = memoryFallback.object else { throw error }
+            sessionToReturn = fallback
+        }
+        if sessionToReturn == nil {
+            sessionToReturn = memoryFallback.object
+        }
         if let session = sessionToReturn, session.expiresAt.isInThePast {
             sessionToReturn = nil
             sessionManager.resetSession()
@@ -138,14 +183,30 @@ class MemberSessionStorageWrapper: ObjectStorageWrapper {
     @Dependency(\.sessionManager) var sessionManager
     let item = EncryptedUserDefaultsItem.memberSession
     var dataWasExpected = false
+    private let memoryFallback = ObjectMemoryFallback<MemberSession>()
+
+    var lastValidatedAtDate: Date? {
+        let last = try? userDefaultsClient.getObject(Date.self, for: EncryptedUserDefaultsItem.lastValidatedAtDate(item.name))
+        return last ?? memoryFallback.lastValidatedAt
+    }
 
     func setObject(object: MemberSession?) {
+        memoryFallback.set(object)
         dataWasExpected = object != nil
         try? userDefaultsClient.setObjectValue(object, for: item)
     }
 
     func getObject() throws -> MemberSession? {
-        var sessionToReturn: MemberSession? = try userDefaultsClient.getObject(MemberSession.self, for: item)
+        var sessionToReturn: MemberSession?
+        do {
+            sessionToReturn = try userDefaultsClient.getObject(MemberSession.self, for: item)
+        } catch {
+            guard let fallback = memoryFallback.object else { throw error }
+            sessionToReturn = fallback
+        }
+        if sessionToReturn == nil {
+            sessionToReturn = memoryFallback.object
+        }
         if let session = sessionToReturn, session.expiresAt.isInThePast {
             sessionToReturn = nil
             sessionManager.resetSession()

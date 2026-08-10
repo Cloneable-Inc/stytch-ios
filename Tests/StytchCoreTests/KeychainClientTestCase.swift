@@ -93,13 +93,16 @@ final class KeychainClientTestCase: BaseTestCase {
         // Expected fields:
         // - account set to ENCRYPTEDUSERDEFAULTSKEYNAME
         // - value data stored as bytes
-        // - pdmn = "ck", meaning kSecAttrAccessibleAfterFirstUnlock
+        // - pdmn = "cku", meaning kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        //   (the key must not ride backups/iCloud Keychain to another device)
+        // - sync = 0 (explicitly not synchronizable)
         XCTAssertEqual(
             item.updateQuerySegment(for: itemValueForKey("value")) as CFDictionary,
             [
                 "acct": ENCRYPTEDUSERDEFAULTSKEYNAME,
                 "v_Data": Data("value".utf8),
-                "pdmn": "ck",
+                "pdmn": "cku",
+                "sync": 0,
             ] as CFDictionary
         )
 
@@ -110,7 +113,8 @@ final class KeychainClientTestCase: BaseTestCase {
         // - class = generic password
         // - value data stored as bytes
         // - nleg = 1 (data protection keychain)
-        // - pdmn = "ck" (AfterFirstUnlock accessibility)
+        // - pdmn = "cku" (AfterFirstUnlockThisDeviceOnly accessibility)
+        // - sync = 0 (explicitly not synchronizable)
         XCTAssertEqual(
             item.insertQuery(value: itemValueForKey("new_value")) as CFDictionary,
             [
@@ -119,7 +123,8 @@ final class KeychainClientTestCase: BaseTestCase {
                 "class": "genp",
                 "v_Data": Data("new_value".utf8),
                 "nleg": 1,
-                "pdmn": "ck", // AfterFirstUnlock
+                "pdmn": "cku", // AfterFirstUnlockThisDeviceOnly
+                "sync": 0,
             ] as CFDictionary
         )
     }

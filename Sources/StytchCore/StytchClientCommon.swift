@@ -108,10 +108,28 @@ extension StytchClientCommonInternal {
     }
 
     private func resetKeychainOnFreshInstall() {
-        guard
-            case let installIdDefaultsKey = "stytch_install_id_defaults_key",
-            Current.defaults.string(forKey: installIdDefaultsKey) == nil
-        else { return }
+        let installIdDefaultsKey = "stytch_install_id_defaults_key"
+        guard Current.defaults.string(forKey: installIdDefaultsKey) == nil else { return }
+
+        #if os(iOS)
+        // A nil install id is only trustworthy when protected data is
+        // confirmed available: standard UserDefaults is unreadable before
+        // first unlock (background/prewarm launches read every key as nil),
+        // and SecItemDelete succeeds even while the device is locked — so
+        // wiping here on a locked-window misread destroys the live encryption
+        // key of an existing install. Defer the decision to a later launch.
+        guard ProtectedDataAvailability.shared.isAffirmativelyAvailable else { return }
+        #endif
+
+        // Unprotected on-disk evidence survives where UserDefaults doesn't:
+        // if a key was ever created for this install, this is an existing
+        // install whose defaults are missing or poisoned — restore the install
+        // id, but never wipe the keychain. The evidence file is removed with
+        // the app container on uninstall, so a true reinstall still resets.
+        if EncryptionKeyEvidence.exists {
+            Current.defaults.set(Current.uuid().uuidString, forKey: installIdDefaultsKey)
+            return
+        }
 
         Current.defaults.set(Current.uuid().uuidString, forKey: installIdDefaultsKey)
         KeychainItem.allItems.forEach { item in

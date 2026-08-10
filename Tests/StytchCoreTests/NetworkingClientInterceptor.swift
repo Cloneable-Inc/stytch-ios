@@ -4,18 +4,30 @@ import XCTest
 @testable import StytchCore
 
 final class NetworkingClientInterceptor: NetworkingClient {
-    private(set) var requests: [URLRequest] = []
+    // Requests arrive concurrently (SDK code fires telemetry from detached
+    // tasks), so every access to these arrays must hold the lock — unguarded
+    // mutation was intermittently crashing the whole test runner
+    // ("Array replace: subrange extends past the end").
+    private let lock = NSLock()
+    private var _requests: [URLRequest] = []
     private var responses: [Result<Data, Error>] = []
+
+    var requests: [URLRequest] {
+        lock.withLock { _requests }
+    }
 
     func configureDFP(dfpEnabled _: Bool, dfpAuthMode _: DFPProtectedAuthMode?) {}
 
     func handleRequest(request: URLRequest, useDFPPA _: Bool) async throws -> (Data, HTTPURLResponse) {
-        if request.url?.absoluteString.contains("/v1/events") != nil {
-            responses.append(.success(try Current.jsonEncoder.encode(AuthenticateResponse.mock)).map { $0.surroundInDataJSONContainer() })
+        let next: Result<Data, Error> = try lock.withLock {
+            if request.url?.absoluteString.contains("/v1/events") != nil {
+                responses.append(.success(try Current.jsonEncoder.encode(AuthenticateResponse.mock)).map { $0.surroundInDataJSONContainer() })
+            }
+            _requests.append(request)
+            return responses.removeFirst()
         }
-        requests.append(request)
 
-        switch responses.removeFirst() {
+        switch next {
         case let .success(data):
             return try (
                 data,
@@ -27,7 +39,7 @@ final class NetworkingClientInterceptor: NetworkingClient {
     }
 
     func responses(@ResponsesBuilder _ build: () -> ResponsesContainer) {
-        responses = build().responses.map { result in
+        let built = build().responses.map { result in
             result.flatMap {
                 do {
                     return .success(try Current.jsonEncoder.encode($0)).map { $0.surroundInDataJSONContainer() }
@@ -37,11 +49,14 @@ final class NetworkingClientInterceptor: NetworkingClient {
                 }
             }
         }
+        lock.withLock { responses = built }
     }
 
     func reset() {
-        requests = []
-        responses = []
+        lock.withLock {
+            _requests = []
+            responses = []
+        }
     }
 }
 

@@ -12,6 +12,13 @@ class BaseTestCase: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
 
+        // Deterministic environment for the missing-key policy: protected data
+        // is "available" (the test host is an unlocked foreground app; the
+        // notification-backed cache may not have warmed yet) and there is no
+        // on-disk existing-install evidence.
+        ProtectedDataAvailability.overrideForTesting = true
+        EncryptionKeyEvidence.overrideForTesting = false
+
         Current.networkingClient = networkInterceptor
         Current.sessionsPollingClient = .failing
         Current.keychainClient = KeychainClientMock()

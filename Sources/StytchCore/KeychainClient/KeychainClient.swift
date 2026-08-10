@@ -55,6 +55,10 @@ struct BiometricPrivateKeyRegistration: Codable {
 }
 
 public enum KeychainError: Swift.Error, Equatable {
+    /// The encryption key could not be read while encrypted payloads still
+    /// exist — the store is treated as unavailable rather than the key being
+    /// destructively regenerated over the persisted data.
+    case encryptionKeyUnavailable
     case resultMissingAccount
     case resultMissingDates
     case resultNotArray

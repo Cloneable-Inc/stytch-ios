@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
 
+let STYTCHENCRYPTEDUSERDEFAULTSSUITENAME = "StytchEncryptedUserDefaults"
+
 final class EncryptedUserDefaultsClientImplementation: EncryptedUserDefaultsClient {
     static let shared = EncryptedUserDefaultsClientImplementation()
     @Dependency(\.keychainClient) private var keychainClient
@@ -11,7 +13,7 @@ final class EncryptedUserDefaultsClientImplementation: EncryptedUserDefaultsClie
         DispatchQueue.getSpecific(key: queueKey) != nil
     }
 
-    internal let defaults: UserDefaults = .init(suiteName: "StytchEncryptedUserDefaults") ?? .standard
+    internal let defaults: UserDefaults = .init(suiteName: STYTCHENCRYPTEDUSERDEFAULTSSUITENAME) ?? .standard
 
     private init() {
         queue = DispatchQueue(label: "StytchEncryptedUserDefaultsClientQueue")

@@ -47,10 +47,14 @@ struct KeychainItem {
             querySegment[kSecAttrAccessControl] = accessControl
         }
 
-        // Make the encryption key available after first unlock
+        // Available after first unlock, pinned to this device: a session
+        // encryption key must not ride backups/iCloud Keychain to another
+        // device (the UserDefaults ciphertext it protects is device-local
+        // state, and external key deletion/restoration is exactly the failure
+        // mode behind silent session-store loss).
         if kind == .encryptionKey {
-            querySegment[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
-            // or use kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly if you do not want sync
+            querySegment[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            querySegment[kSecAttrSynchronizable] = false
         }
 
         return querySegment

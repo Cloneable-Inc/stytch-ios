@@ -118,12 +118,38 @@ class SessionManager {
 }
 
 // Session Tokens
+//
+// Tokens are written through to the encrypted store but also kept in memory:
+// when the store cannot hold them (encryption key unavailable this launch),
+// the live session must remain usable for the rest of the process — the
+// server, not a local storage failure, is the arbiter of session validity.
+// The persisted value wins on read so a fresh launch never sees stale RAM.
+private let sessionTokenMemoryFallback = MemoryFallback()
+
+final class MemoryFallback {
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    func set(_ value: String?, for key: String) {
+        lock.lock()
+        values[key] = value
+        lock.unlock()
+    }
+
+    func get(_ key: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key]
+    }
+}
+
 extension SessionManager {
     private(set) var sessionToken: SessionToken? {
         get {
-            try? userDefaultsClient.getStringValue(.sessionToken)
+            (try? userDefaultsClient.getStringValue(.sessionToken)) ?? sessionTokenMemoryFallback.get(EncryptedUserDefaultsItem.sessionToken.name)
         }
         set {
+            sessionTokenMemoryFallback.set(newValue, for: EncryptedUserDefaultsItem.sessionToken.name)
             let userDefaultsItem: EncryptedUserDefaultsItem = .sessionToken
             if let newValue = newValue {
                 try? userDefaultsClient.setStringValue(newValue, for: userDefaultsItem)
@@ -135,9 +161,10 @@ extension SessionManager {
 
     private(set) var sessionJwt: SessionToken? {
         get {
-            try? userDefaultsClient.getStringValue(.sessionJwt)
+            (try? userDefaultsClient.getStringValue(.sessionJwt)) ?? sessionTokenMemoryFallback.get(EncryptedUserDefaultsItem.sessionJwt.name)
         }
         set {
+            sessionTokenMemoryFallback.set(newValue, for: EncryptedUserDefaultsItem.sessionJwt.name)
             let userDefaultsItem: EncryptedUserDefaultsItem = .sessionJwt
             if let newValue = newValue {
                 try? userDefaultsClient.setStringValue(newValue, for: userDefaultsItem)
