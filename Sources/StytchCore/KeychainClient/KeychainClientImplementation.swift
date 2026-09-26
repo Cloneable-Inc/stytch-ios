@@ -70,30 +70,67 @@ final class ProtectedDataAvailability {
     static var overrideForTesting: Bool?
     private let lock = NSLock()
     private var cachedAvailable: Bool?
+    private var source: EncryptionKeyReadSnapshot.ProtectedDataSource = .unknown
+    private var appState = "unknown"
 
     private init() {
         NotificationCenter.default.addObserver(
             forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.update(true) }
+        ) { [weak self] _ in self?.update(true, from: .didBecomeAvailableNotification) }
         NotificationCenter.default.addObserver(
             forName: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.update(false) }
+        ) { [weak self] _ in self?.update(false, from: .willBecomeUnavailableNotification) }
+        for (name, state) in [
+            (UIApplication.didBecomeActiveNotification, "active"),
+            (UIApplication.willResignActiveNotification, "inactive"),
+            (UIApplication.didEnterBackgroundNotification, "background"),
+            (UIApplication.willEnterForegroundNotification, "inactive"),
+        ] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.setAppState(state)
+            }
+        }
         // Re-read on foreground activation as well: the availability property
         // has documented false negatives right after launch where the
         // did-become-available notification then never fires (it only signals
         // transitions) — an activation re-check heals a stale cached value.
         NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.update(UIApplication.shared.isProtectedDataAvailable) }
+        ) { [weak self] _ in self?.update(UIApplication.shared.isProtectedDataAvailable, from: .didBecomeActiveNotification) }
         DispatchQueue.main.async { [weak self] in
-            self?.update(UIApplication.shared.isProtectedDataAvailable)
+            self?.update(UIApplication.shared.isProtectedDataAvailable, from: .launchAsyncRead)
+            self?.setAppState(Self.describe(UIApplication.shared.applicationState))
         }
     }
 
-    private func update(_ value: Bool) {
+    private func update(_ value: Bool, from newSource: EncryptionKeyReadSnapshot.ProtectedDataSource) {
         lock.lock()
         cachedAvailable = value
+        source = newSource
         lock.unlock()
+    }
+
+    private func setAppState(_ state: String) {
+        lock.lock()
+        appState = state
+        lock.unlock()
+    }
+
+    private static func describe(_ state: UIApplication.State) -> String {
+        switch state {
+        case .active: return "active"
+        case .inactive: return "inactive"
+        case .background: return "background"
+        @unknown default: return "unknown"
+        }
+    }
+
+    /// The cached flag, its source and the last known app state, without triggering a read.
+    var diagnostics: (cached: Bool?, source: EncryptionKeyReadSnapshot.ProtectedDataSource, appState: String) {
+        if let value = Self.overrideForTesting { return (value, .testOverride, "test") }
+        lock.lock()
+        defer { lock.unlock() }
+        return (cachedAvailable, source, appState)
     }
 
     /// Cached value, seeded synchronously when the caller is already on the
@@ -110,7 +147,7 @@ final class ProtectedDataAvailability {
         lock.unlock()
         guard Thread.isMainThread else { return nil }
         let value = UIApplication.shared.isProtectedDataAvailable
-        update(value)
+        update(value, from: .mainThreadRead)
         return value
     }
 
@@ -152,6 +189,7 @@ final class KeychainClientImplementation: KeychainClient {
                 // For some reason, we are trying to read the encryption key before protected data became available
                 // Log that this happened (which it hopefully won't?), but leave the behavior up to the caller (EncryptedUserDefaultsClient) to handle a missing key (throw an error)
                 StytchConsoleLogger.error(message: "Attempted to read encryption key before protected data became available")
+                recordKeyRead(.skippedProtectedDataUnavailable)
             }
             #else
             try? getEncryptionKey()
@@ -231,7 +269,14 @@ final class KeychainClientImplementation: KeychainClient {
 
     func getEncryptionKey() throws {
         try safelyEnqueue {
-            let result = try getFirstQueryResult(KeychainItem.encryptionKey)
+            lastEncryptionKeyQuery = nil
+            let result: KeychainQueryResult?
+            do {
+                result = try getFirstQueryResult(KeychainItem.encryptionKey)
+            } catch {
+                recordKeyRead(.readFailed, parseError: String(describing: error))
+                throw error
+            }
             guard let result else {
                 let protectedDataAvailable: Bool
                 #if os(iOS)
@@ -239,14 +284,16 @@ final class KeychainClientImplementation: KeychainClient {
                 #else
                 protectedDataAvailable = true
                 #endif
-                switch Self.decideOnMissingKey(
+                let decision = Self.decideOnMissingKey(
                     // The evidence marker is readable in every launch window;
                     // the ciphertext check backstops installs that predate it.
                     evidenceOfExistingInstall: EncryptionKeyEvidence.exists || encryptedPayloadsExist(),
                     protectedDataAvailable: protectedDataAvailable,
                     priorStrikes: persistedKeyMissingStrikes(),
                     strikeAlreadyRecordedThisLaunch: recordedKeyMissingStrikeThisLaunch
-                ) {
+                )
+                defer { recordKeyRead(.keyMissing, decision: decision) }
+                switch decision {
                 case .mintFresh:
                     try mintAndStoreFreshKey()
                 case let .storeUnavailable(strike):
@@ -270,10 +317,45 @@ final class KeychainClientImplementation: KeychainClient {
                 }
                 return
             }
+            recordKeyRead(.keyFound)
             clearKeyMissingStrikes()
             EncryptionKeyEvidence.record()
             upgradeKeyItemProtectionIfNeeded()
             cachedEncryptionKey = SymmetricKey(data: result.data)
+        }
+    }
+
+    // Touched only on `queue`.
+    private var lastEncryptionKeyQuery: (status: OSStatus, matches: Int)?
+
+    private func recordKeyRead(_ outcome: EncryptionKeyReadSnapshot.Outcome, parseError: String? = nil, decision: MissingKeyDecision? = nil) {
+        #if os(iOS)
+        let protectedData = ProtectedDataAvailability.shared.diagnostics
+        #else
+        let protectedData: (cached: Bool?, source: EncryptionKeyReadSnapshot.ProtectedDataSource, appState: String) = (nil, .notApplicable, "notApplicable")
+        #endif
+        StytchKeyReadDiagnostics.record(EncryptionKeyReadSnapshot(
+            date: Date(),
+            outcome: outcome,
+            protectedDataCached: protectedData.cached,
+            protectedDataSource: protectedData.source,
+            secItemStatus: outcome == .skippedProtectedDataUnavailable ? nil : lastEncryptionKeyQuery?.status,
+            matchCount: outcome == .skippedProtectedDataUnavailable ? nil : lastEncryptionKeyQuery?.matches,
+            parseError: parseError,
+            ciphertextPresent: encryptedPayloadsExist(),
+            evidencePresent: EncryptionKeyEvidence.exists,
+            strikes: persistedKeyMissingStrikes(),
+            missingKeyDecision: decision.map(Self.describe),
+            activePrewarm: ProcessInfo.processInfo.environment["ActivePrewarm"],
+            appState: protectedData.appState
+        ))
+    }
+
+    static func describe(_ decision: MissingKeyDecision) -> String {
+        switch decision {
+        case .mintFresh: return "mintFresh"
+        case let .storeUnavailable(strike): return strike.map { "storeUnavailable(strike \($0))" } ?? "storeUnavailable(locked window)"
+        case .resetOrphanedStoreAndMint: return "resetOrphanedStoreAndMint"
         }
     }
 
@@ -383,6 +465,7 @@ final class KeychainClientImplementation: KeychainClient {
                 var newQuery = query
                 newQuery[kSecAttrAccount] = ENCRYPTEDUSERDEFAULTSKEYNAME
                 status = SecItemCopyMatching(newQuery as CFDictionary, &result)
+                lastEncryptionKeyQuery = (status ?? errSecSuccess, (result as? [Any])?.count ?? 0)
             } else {
                 status = SecItemCopyMatching(query as CFDictionary, &result)
             }
